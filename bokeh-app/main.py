@@ -1,89 +1,111 @@
 from os.path import join, dirname
 import datetime
+from base64 import b64decode
+from io import BytesIO
 
+import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
 
 from bokeh.io import curdoc
 from bokeh.layouts import row, column
-from bokeh.models import ColumnDataSource, DataRange1d, Select
+from bokeh.models import ColumnDataSource, DataRange1d, Select, FileInput, Spinner
 from bokeh.palettes import Blues4
 from bokeh.plotting import figure
 
 STATISTICS = ['record_min_temp', 'actual_min_temp', 'average_min_temp', 'average_max_temp', 'actual_max_temp', 'record_max_temp']
+N_BINS = 100
+SPINNER_MAX = 9200
 
-def get_dataset(src, name, distribution):
-    df = src[src.airport == name].copy()
-    del df['airport']
-    df['date'] = pd.to_datetime(df.date)
-    # timedelta here instead of pd.DateOffset to avoid pandas bug < 0.18 (Pandas issue #11925)
-    df['left'] = df.date - datetime.timedelta(days=0.5)
-    df['right'] = df.date + datetime.timedelta(days=0.5)
-    df = df.set_index(['date'])
-    df.sort_index(inplace=True)
-    if distribution == 'Smoothed':
-        window, order = 51, 3
-        for key in STATISTICS:
-            df[key] = savgol_filter(df[key], window, order)
+def make_plot_2(source):
+    plot = figure(plot_width=800, tools="", toolbar_location=None)
 
-    return ColumnDataSource(data=df)
-
-def make_plot(source, title):
-    plot = figure(x_axis_type="datetime", plot_width=800, tools="", toolbar_location=None)
-    plot.title.text = title
-
-    plot.quad(top='record_max_temp', bottom='record_min_temp', left='left', right='right',
-              color=Blues4[2], source=source, legend="Record")
-    plot.quad(top='average_max_temp', bottom='average_min_temp', left='left', right='right',
-              color=Blues4[1], source=source, legend="Average")
-    plot.quad(top='actual_max_temp', bottom='actual_min_temp', left='left', right='right',
-              color=Blues4[0], alpha=0.5, line_color="black", source=source, legend="Actual")
+    lines1 = plot.line(x='x', y='y1', source=source, legend="Dataset 1", line_color='red')
+    lines2 = plot.line(x='x', y='y2', source=source, legend="Dataset 2", line_color='blue')
 
     # fixed attributes
-    plot.xaxis.axis_label = None
-    plot.yaxis.axis_label = "Temperature (F)"
+    plot.title.text = 'asdf'
+    plot.xaxis.axis_label = 'p-value'
+    plot.yaxis.axis_label = "eCDF"
     plot.axis.axis_label_text_font_style = "bold"
-    plot.x_range = DataRange1d(range_padding=0.0)
+    # plot.x_range = DataRange1d(range_padding=0.0) # not sure what this does
     plot.grid.grid_line_alpha = 0.3
 
     return plot
 
 def update_plot(attrname, old, new):
+    # pylint: disable=W
     city = city_select.value
     plot.title.text = "Weather data for " + cities[city]['title']
 
     src = get_dataset(df, cities[city]['airport'], distribution_select.value)
     source.data.update(src.data)
 
-city = 'Austin'
-distribution = 'Discrete'
+def get_csv(stream):
+    df = pd.read_csv(stream, index_col=0, header=0)
+    df.columns = df.columns.astype(int)
+    df = df.reset_index(drop=True)
 
-cities = {
-    'Austin': {
-        'airport': 'AUS',
-        'title': 'Austin, TX',
-    },
-    'Boston': {
-        'airport': 'BOS',
-        'title': 'Boston, MA',
-    },
-    'Seattle': {
-        'airport': 'SEA',
-        'title': 'Seattle, WA',
-    }
-}
+    return df
 
-city_select = Select(value=city, title='City', options=sorted(cities.keys()))
-distribution_select = Select(value=distribution, title='Distribution', options=['Discrete', 'Smoothed'])
+def update_file_1(attrname, old, new):
+    global whole_dset_1
+    print('Processing new file1')
+    file_stream = BytesIO(b64decode(file_select_1.value))
+    df = get_csv(file_stream)
+    whole_dset_1 = {}
+    for key, value in df.items():
+        arr = value.dropna().to_numpy().ravel()
+        n = len(arr)
+        hist, bins = np.histogram(arr, bins=N_BINS)
+        whole_dset_1[key] = hist.cumsum()/n
+    print('Done processing file1')
 
-df = pd.read_csv(join(dirname(__file__), 'data/2015_weather.csv'))
-source = get_dataset(df, cities[city]['airport'], distribution)
-plot = make_plot(source, "Weather data for " + cities[city]['title'])
+def update_file_2(attrname, old, new):
+    global whole_dset_2
+    print('Processing new file2')
+    file_stream = BytesIO(b64decode(file_select_1.value))
+    df = get_csv(file_stream)
+    whole_dset_2 = {}
+    for key, value in df.items():
+        arr = value.dropna().to_numpy().ravel()
+        n = len(arr)
+        hist, bins = np.histogram(arr, bins=N_BINS)
+        whole_dset_2[key] = hist.cumsum()/n
+    print('Done processing file2')
 
-city_select.on_change('value', update_plot)
-distribution_select.on_change('value', update_plot)
+def update_pos(attrname, old, new):
+    print('Updating position')
+    pos = pos_spinner.value
+    x_data = np.linspace(0, 1, N_BINS)
+    y_data_1 = whole_dset_1.get(pos, np.ones(N_BINS))
+    y_data_2 = whole_dset_2.get(pos, np.ones(N_BINS))
+    new_data = ColumnDataSource({'x': x_data, 'y1': y_data_1, 'y2': y_data_2}) # Delete this line
 
-controls = column(city_select, distribution_select)
+    print(pos)
+    print(x_data)
+    print(y_data_1)
+    print(whole_dset_1.keys())
+
+    to_plot.data = {'x': x_data, 'y1': y_data_1, 'y2': y_data_2}
+    print('Done updating position')
+
+whole_dset_1 = {}
+whole_dset_2 = {}
+
+to_plot = ColumnDataSource({'x': [], 'y1': [], 'y2': []})
+
+file_select_1 = FileInput()
+file_select_2 = FileInput()
+pos_spinner = Spinner(low=0, high=SPINNER_MAX)
+
+plot = make_plot_2(to_plot)
+
+file_select_1.on_change('value', update_file_1)
+file_select_2.on_change('value', update_file_2)
+pos_spinner.on_change('value', update_pos)
+
+controls = column(pos_spinner, file_select_1, file_select_2)
 
 curdoc().add_root(row(plot, controls))
-curdoc().title = "Weather"
+curdoc().title = "Per-read Stats Viewer"
